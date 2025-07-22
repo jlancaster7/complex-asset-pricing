@@ -1,0 +1,34 @@
+[project]
+name = "ls-pricing"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Josh Lancaster",email = "lancaster.joshua.c@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy (>=2.2,<2.3)",
+    "pandas (>=2.3.1,<3.0.0)",
+    "scipy (>=1.16.0,<2.0.0)",
+    "scikit-learn (>=1.7.1,<2.0.0)",
+    "statsmodels (>=0.14.5,<0.15.0)",
+    "matplotlib (>=3.10.3,<4.0.0)",
+    "numba (>=0.61.2,<0.62.0)",
+    "seaborn (>=0.13.2,<0.14.0)"
+]
+
+[tool.poetry]
+packages = [{include = "ls_pricing", from = "src"}]
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.1"
+pytest-cov = "^6.2.1"
+black = "^25.1.0"
+isort = "^6.0.1"
+mypy = "^1.17.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
