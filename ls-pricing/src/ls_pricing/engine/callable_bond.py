@@ -163,7 +163,7 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                 exercise = (
                     (immediate_issuer_value > continuation_value_smooth)
                     & itm_mask
-                    & (~call_indicator)
+                    # & (~call_indicator)
                 )
 
                 # Update issuer values based on exercise decision
@@ -177,10 +177,10 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                 # Record what investor receives when bond is called
                 cash_flows[exercise, step] = callable_bond.call_price
                 # Zero out future cash flows for called bonds
-                cash_flows[exercise, step + 1 :] = 0
+                # cash_flows[exercise, step + 1 :] = 0
 
                 # Also zero out future issuer values for called bonds
-                issuer_values[exercise, step + 1 :] = 0
+                # issuer_values[exercise, step + 1 :] = 0
 
                 # Store exercise boundary
                 if np.sum(exercise) > 0:
@@ -200,16 +200,16 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                 exercise = (
                     (immediate_issuer_value > continuation)
                     & (immediate_ex_value > 5.0)
-                    & (~call_indicator)
+                    # & (~call_indicator)
                 )
 
                 if np.sum(exercise) > 0:
                     call_indicator[exercise] = True
                     call_time[exercise] = current_time
                     cash_flows[exercise, step] = callable_bond.call_price
-                    cash_flows[exercise, step + 1 :] = 0
+                    # cash_flows[exercise, step + 1 :] = 0
                     issuer_values[exercise, step] = immediate_issuer_value
-                    issuer_values[exercise, step + 1 :] = 0
+                    # issuer_values[exercise, step + 1 :] = 0
 
         # Add regular coupon payments for bonds that weren't called
         self._add_scheduled_payments(
@@ -218,7 +218,7 @@ class CallableBondEngine(LongstaffSchwartzEngine):
 
         # The callable bond price from investor perspective is the negative of
         # the issuer's value at time 0 (what the issuer owes)
-        callable_price = -np.mean(issuer_values[:, 0])
+        callable_price = float(-np.mean(issuer_values[:, 0]))
 
         # Alternative: Calculate from cash flows (for verification)
         # callable_bond_values = self._discount_cash_flows(
@@ -231,8 +231,8 @@ class CallableBondEngine(LongstaffSchwartzEngine):
         option_value = straight_bond_value - callable_price
 
         # Calculate call statistics
-        call_prob = np.mean(call_indicator)
-        mean_call_time = np.mean(call_time[call_indicator]) if call_prob > 0 else 0
+        call_prob = float(np.mean(call_indicator))
+        mean_call_time = float(np.mean(call_time[call_indicator])) if call_prob > 0 else 0.0
 
         results = {
             "callable_bond_price": callable_price,
