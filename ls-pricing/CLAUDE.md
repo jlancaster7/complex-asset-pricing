@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## IMPORTANT: Working Style Guidelines
+
+1. **DISCUSS BEFORE IMPLEMENTING**: When the user asks a question or mentions something, first discuss and understand what they want before creating new code or making changes. Don't assume they want implementation - they might just be asking for information or clarification.
+
+2. **WAIT FOR CONFIRMATION**: After discussing options or approaches, wait for the user to confirm they want to proceed before writing code or making edits.
+
+3. **ASK DON'T ASSUME**: If unclear about what the user wants, ask for clarification rather than guessing and implementing.
+
 ## Commands
 
 ### Development Setup

@@ -85,25 +85,19 @@ class CallableBondEngine(LongstaffSchwartzEngine):
         issuer_values = np.zeros((n_paths, len(times)))
 
         # Calculate continuation values starting from maturity
-        # At maturity, if not called, investor receives final coupon + principal
+        # At maturity, bond always pays final coupon + principal (never callable at maturity)
         terminal_idx = len(times) - 1
-        if terminal_idx not in exercise_indices:
-            # Bond matures naturally
-            cash_flows[:, terminal_idx] = (
-                callable_bond.coupon_payment + callable_bond.face_value
-            )
-            # Issuer owes the final payment (negative value)
-            issuer_values[:, terminal_idx] = -(
-                callable_bond.coupon_payment + callable_bond.face_value
-            )
+        issuer_values[:, terminal_idx] = -(
+            callable_bond.coupon_payment + callable_bond.face_value
+        )
 
-        # First, we need to propagate issuer values backward through ALL time steps
-        # Start from the end and work backwards
+        # Single backward induction loop through ALL time steps
+        # This ensures continuation values properly reflect future optimal decisions
         for step in range(len(times) - 2, -1, -1):  # From second-to-last to first
             current_time = times[step]
             next_step = step + 1
 
-            # Default: propagate and discount issuer values from next period
+            # First, propagate and discount issuer values from next period
             dt = times[next_step] - times[step]
             discount_rates = rates[:, step] + callable_bond.credit_spread
             discount_factors = np.exp(-discount_rates * dt)
@@ -113,103 +107,165 @@ class CallableBondEngine(LongstaffSchwartzEngine):
             if self._is_coupon_date(current_time, callable_bond):
                 issuer_values[:, step] -= callable_bond.coupon_payment
 
-        # Now do the optimal exercise decisions at each callable date
-        for i in range(len(exercise_indices) - 1, -1, -1):
-            step = exercise_indices[i]
-            current_time = times[step]
-
-            # Bond value at this node (what it's worth if held)
-            bond_values = callable_bond.value_at_node(
-                self.mc_engine.model, current_time, rates[:, step]
-            )
-
-            # Immediate exercise value for issuer
-            # Issuer saves: Bond Value - Call Price
-            immediate_ex_value = bond_values - callable_bond.call_price
-            # Debug: print current state
-            # print(
-            #     f"Step {step}, Time {current_time}, Bond Value: {bond_values.mean():.2f}, "
-            #     f"Immediate Exercise Value: {immediate_ex_value.mean():.2f}"
-            # )
-            # Only consider calling if bond is worth more than call price
-            itm_mask = immediate_ex_value > 0
-
-            if np.sum(itm_mask) > 10:  # Need enough ITM paths for regression
-                # The continuation value is already computed in issuer_values
-                # It represents the issuer's future liability if they don't call
-                continuation = issuer_values[:, step].copy()
-
-                # Use regression to smooth the continuation values
-                # This helps with the exercise decision
-                X_itm = rates[itm_mask, step]
-                y_itm = continuation[itm_mask]
-
-                # Generate basis functions
-                basis = self.basis_func(X_itm, self.basis_degree)
-
-                # Fit regression
-                self.regressor.fit(basis, y_itm)
-
-                # Predict continuation value for all ITM paths
-                continuation_value_smooth = np.zeros(n_paths)
-                continuation_value_smooth[itm_mask] = self.regressor.predict(basis)
-
-                # For non-ITM paths, use the raw continuation values
-                continuation_value_smooth[~itm_mask] = continuation[~itm_mask]
-
-                # Exercise decision from issuer perspective:
-                # Call if: cost of calling now < expected future cost
-                immediate_issuer_value = -callable_bond.call_price
-                exercise = (
-                    (immediate_issuer_value > continuation_value_smooth)
-                    & itm_mask
-                    # & (~call_indicator)
+            # Now check if this is a callable date and make optimal exercise decision
+            if step in exercise_indices:
+                # Bond value at this node (what it's worth if held)
+                bond_values = callable_bond.value_at_node(
+                    self.mc_engine.model, current_time, rates[:, step]
                 )
 
-                # Update issuer values based on exercise decision
-                # Only update for exercised paths - non-exercised paths keep their continuation values
-                issuer_values[exercise, step] = immediate_issuer_value
+                # Immediate exercise value for issuer
+                # Issuer saves: Bond Value - Call Price
+                immediate_ex_value = bond_values - callable_bond.call_price
 
-                # Update tracking arrays
-                call_indicator[exercise] = True
-                call_time[exercise] = current_time
+                # Only consider calling if bond is worth more than call price
+                itm_mask = immediate_ex_value > 0
 
-                # Record what investor receives when bond is called
-                cash_flows[exercise, step] = callable_bond.call_price
-                # Zero out future cash flows for called bonds
-                # cash_flows[exercise, step + 1 :] = 0
+                if np.sum(itm_mask) > 10:  # Need enough ITM paths for regression
+                    # The continuation value is already computed in issuer_values
+                    # It now properly includes all future optimal exercise decisions!
+                    continuation = issuer_values[:, step].copy()
 
-                # Also zero out future issuer values for called bonds
-                # issuer_values[exercise, step + 1 :] = 0
+                    # Use regression to smooth the continuation values
+                    # This helps with the exercise decision
+                    X_itm = rates[itm_mask, step]
+                    y_itm = continuation[itm_mask]
 
-                # Store exercise boundary
-                if np.sum(exercise) > 0:
-                    exercise_boundary[current_time] = {
-                        "mean_rate": np.mean(rates[exercise, step]),
-                        "mean_bond_value": np.mean(bond_values[exercise]),
-                        "call_probability": np.mean(exercise),
-                        "n_called": np.sum(exercise),
-                    }
-            else:
-                # Not enough ITM paths for regression
-                # Use simple decision rule: call if deep in the money
-                immediate_issuer_value = -callable_bond.call_price
-                continuation = issuer_values[:, step]
+                    # Generate basis functions
+                    basis = self.basis_func(X_itm, self.basis_degree)
 
-                # Call if immediate cost < continuation cost
-                exercise = (
-                    (immediate_issuer_value > continuation)
-                    & (immediate_ex_value > 5.0)
-                    # & (~call_indicator)
-                )
+                    # Fit regression
+                    self.regressor.fit(basis, y_itm)
 
-                if np.sum(exercise) > 0:
+                    # Predict continuation value for ALL paths using the regression
+                    # The regression was fitted on ITM paths but can predict for all
+                    X_all = rates[:, step]
+                    basis_all = self.basis_func(X_all, self.basis_degree)
+                    # basis_itm = self.basis_func(X_itm, self.basis_degree)
+                    continuation_value_smooth = self.regressor.predict(basis_all)
+
+                    # VISUALIZATION LOGGING: Show regression relationship
+                    if step in [20, 25, 30] and getattr(
+                        self, "enable_regression_logging", False
+                    ):
+                        print(f"\n{'='*60}")
+                        print(f"REGRESSION VISUALIZATION at Time {current_time:.1f}")
+                        print(f"{'='*60}")
+                        print(f"Number of ITM paths for regression: {np.sum(itm_mask)}")
+
+                        # Show some sample points
+                        n_samples = min(10, len(X_itm))
+                        sort_idx = np.argsort(X_itm)[:n_samples]
+
+                        print(f"\nSample regression points (sorted by rate):")
+                        print(
+                            f"{'Rate':>10} | {'Raw Issuer Value':>18} | {'Smoothed Value':>18}"
+                        )
+                        print(f"{'-'*10} | {'-'*18} | {'-'*18}")
+
+                        for i in sort_idx:
+                            raw_val = -y_itm[i]  # Convert to positive for display
+                            # Find the smoothed value for this rate
+                            rate_idx = np.argmin(np.abs(X_all - X_itm[i]))
+                            smooth_val = -continuation_value_smooth[rate_idx]
+                            print(
+                                f"{X_itm[i]:>10.4f} | ${raw_val:>16.2f} | ${smooth_val:>16.2f}"
+                            )
+
+                        # Show exercise boundary
+                        exercise_rates = rates[exercise, step]
+                        if len(exercise_rates) > 0:
+                            print(
+                                f"\nExercise boundary (approximate): rate < {np.max(exercise_rates):.4f}"
+                            )
+                            print(f"Call is optimal when continuation > $100")
+
+                        # Show the regression's effect on exercise decisions
+                        print(f"\nRegression impact on exercise decision:")
+                        print(
+                            f"Paths where raw value suggests exercise but smooth doesn't:"
+                        )
+                        raw_exercise = (
+                            issuer_values[itm_mask, step] > immediate_issuer_value
+                        )
+                        smooth_exercise = (
+                            continuation_value_smooth[itm_mask] < immediate_issuer_value
+                        )
+                        diff_count = np.sum(raw_exercise & ~smooth_exercise)
+                        print(
+                            f"  {diff_count} paths ({diff_count/np.sum(itm_mask)*100:.1f}%)"
+                        )
+
+                        print(f"Paths where smooth suggests exercise but raw doesn't:")
+                        diff_count2 = np.sum(~raw_exercise & smooth_exercise)
+                        print(
+                            f"  {diff_count2} paths ({diff_count2/np.sum(itm_mask)*100:.1f}%)"
+                        )
+
+                    # Exercise decision from issuer perspective:
+                    # Call if: cost of calling now < expected future cost
+                    immediate_issuer_value = -callable_bond.call_price
+
+                    # If calling on a coupon date, must also pay the coupon
+                    if self._is_coupon_date(current_time, callable_bond):
+                        immediate_issuer_value -= callable_bond.coupon_payment
+
+                    exercise = (
+                        immediate_issuer_value > continuation_value_smooth
+                    ) & itm_mask
+
+                    # Update issuer values based on exercise decision
+                    # This is crucial: future time steps will see this decision!
+                    issuer_values[exercise, step] = immediate_issuer_value
+
+                    # Update tracking arrays
                     call_indicator[exercise] = True
                     call_time[exercise] = current_time
-                    cash_flows[exercise, step] = callable_bond.call_price
-                    # cash_flows[exercise, step + 1 :] = 0
-                    issuer_values[exercise, step] = immediate_issuer_value
-                    # issuer_values[exercise, step + 1 :] = 0
+
+                    # Record what investor receives when bond is called
+                    call_payment = callable_bond.call_price
+                    if self._is_coupon_date(current_time, callable_bond):
+                        call_payment += callable_bond.coupon_payment
+                    cash_flows[exercise, step] = call_payment
+                    # Zero out all future cash flows for called bonds
+                    for future_step in range(step + 1, len(times)):
+                        cash_flows[exercise, future_step] = 0
+
+                    # Store exercise boundary
+                    if np.sum(exercise) > 0:
+                        exercise_boundary[current_time] = {
+                            "mean_rate": np.mean(rates[exercise, step]),
+                            "mean_bond_value": np.mean(bond_values[exercise]),
+                            "call_probability": np.mean(exercise),
+                            "n_called": np.sum(exercise),
+                        }
+                else:
+                    # Not enough ITM paths for regression
+                    # Use simple decision rule: call if deep in the money
+                    immediate_issuer_value = -callable_bond.call_price
+
+                    # If calling on a coupon date, must also pay the coupon
+                    if self._is_coupon_date(current_time, callable_bond):
+                        immediate_issuer_value -= callable_bond.coupon_payment
+
+                    continuation = issuer_values[:, step]
+
+                    # Call if immediate cost < continuation cost
+                    exercise = (immediate_issuer_value > continuation) & (
+                        immediate_ex_value > 5.0
+                    )
+
+                    if np.sum(exercise) > 0:
+                        call_indicator[exercise] = True
+                        call_time[exercise] = current_time
+                        call_payment = callable_bond.call_price
+                        if self._is_coupon_date(current_time, callable_bond):
+                            call_payment += callable_bond.coupon_payment
+                        cash_flows[exercise, step] = call_payment
+                        issuer_values[exercise, step] = immediate_issuer_value
+                        # Zero out all future cash flows for called bonds
+                        for future_step in range(step + 1, len(times)):
+                            cash_flows[exercise, future_step] = 0
 
         # Add regular coupon payments for bonds that weren't called
         self._add_scheduled_payments(
@@ -220,19 +276,15 @@ class CallableBondEngine(LongstaffSchwartzEngine):
         # the issuer's value at time 0 (what the issuer owes)
         callable_price = float(-np.mean(issuer_values[:, 0]))
 
-        # Alternative: Calculate from cash flows (for verification)
-        # callable_bond_values = self._discount_cash_flows(
-        #     cash_flows, rates, times, callable_bond
-        # )
-        # callable_price_cf = np.mean(callable_bond_values)
-
         # Calculate straight bond value for comparison
         straight_bond_value = self._price_straight_bond(callable_bond)
         option_value = straight_bond_value - callable_price
 
         # Calculate call statistics
         call_prob = float(np.mean(call_indicator))
-        mean_call_time = float(np.mean(call_time[call_indicator])) if call_prob > 0 else 0.0
+        mean_call_time = (
+            float(np.mean(call_time[call_indicator])) if call_prob > 0 else 0.0
+        )
 
         results = {
             "callable_bond_price": callable_price,
@@ -287,8 +339,11 @@ class CallableBondEngine(LongstaffSchwartzEngine):
             # Find closest time index
             time_idx = np.argmin(np.abs(times - pmt_time))
 
-            # Add payment for bonds not yet called
+            # Add payment for bonds not yet called at this payment time
             for i in range(cash_flows.shape[0]):
+                # Only add payment if:
+                # 1. Bond was never called, OR
+                # 2. Bond was called AFTER this payment time
                 if not call_indicator[i] or call_time[i] > pmt_time:
                     cash_flows[i, time_idx] += pmt_amt
 
