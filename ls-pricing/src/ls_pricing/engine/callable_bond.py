@@ -7,7 +7,18 @@ from ..instruments.bonds import CallableBond
 class CallableBondEngine(LongstaffSchwartzEngine):
     """
     Specialized Longstaff-Schwartz engine for pricing callable bonds
+
+    Parameters
+    ----------
+    include_coupon_on_call : bool, default True
+        If True, a call executed on a coupon date pays (call_price + coupon).
+        If False, only call_price is paid (coupon excluded). Market conventions vary.
     """
+
+    # Type annotations for caches
+    _cached_paths: Optional[Dict[str, np.ndarray]]
+    _cached_maturity: Optional[float]
+    include_coupon_on_call: bool
 
     def __init__(
         self,
@@ -15,11 +26,12 @@ class CallableBondEngine(LongstaffSchwartzEngine):
         basis_type: str = "laguerre",
         basis_degree: int = 3,
         regression_type: str = "ols",
+        include_coupon_on_call: bool = True,
     ):
         super().__init__(mc_engine, basis_type, basis_degree, regression_type)
-        # Cache for Monte Carlo paths
         self._cached_paths = None
         self._cached_maturity = None
+        self.include_coupon_on_call = include_coupon_on_call
 
     def price_callable_bond(
         self, callable_bond: CallableBond, from_investor_perspective: bool = True
@@ -130,84 +142,24 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                     # This helps with the exercise decision
                     X_itm = rates[itm_mask, step]
                     y_itm = continuation[itm_mask]
-
-                    # Generate basis functions
                     basis = self.basis_func(X_itm, self.basis_degree)
-
-                    # Fit regression
                     self.regressor.fit(basis, y_itm)
 
                     # Predict continuation value for ALL paths using the regression
                     # The regression was fitted on ITM paths but can predict for all
                     X_all = rates[:, step]
                     basis_all = self.basis_func(X_all, self.basis_degree)
-                    # basis_itm = self.basis_func(X_itm, self.basis_degree)
                     continuation_value_smooth = self.regressor.predict(basis_all)
-
-                    # VISUALIZATION LOGGING: Show regression relationship
-                    if step in [20, 25, 30] and getattr(
-                        self, "enable_regression_logging", False
-                    ):
-                        print(f"\n{'='*60}")
-                        print(f"REGRESSION VISUALIZATION at Time {current_time:.1f}")
-                        print(f"{'='*60}")
-                        print(f"Number of ITM paths for regression: {np.sum(itm_mask)}")
-
-                        # Show some sample points
-                        n_samples = min(10, len(X_itm))
-                        sort_idx = np.argsort(X_itm)[:n_samples]
-
-                        print(f"\nSample regression points (sorted by rate):")
-                        print(
-                            f"{'Rate':>10} | {'Raw Issuer Value':>18} | {'Smoothed Value':>18}"
-                        )
-                        print(f"{'-'*10} | {'-'*18} | {'-'*18}")
-
-                        for i in sort_idx:
-                            raw_val = -y_itm[i]  # Convert to positive for display
-                            # Find the smoothed value for this rate
-                            rate_idx = np.argmin(np.abs(X_all - X_itm[i]))
-                            smooth_val = -continuation_value_smooth[rate_idx]
-                            print(
-                                f"{X_itm[i]:>10.4f} | ${raw_val:>16.2f} | ${smooth_val:>16.2f}"
-                            )
-
-                        # Show exercise boundary
-                        exercise_rates = rates[exercise, step]
-                        if len(exercise_rates) > 0:
-                            print(
-                                f"\nExercise boundary (approximate): rate < {np.max(exercise_rates):.4f}"
-                            )
-                            print(f"Call is optimal when continuation > $100")
-
-                        # Show the regression's effect on exercise decisions
-                        print(f"\nRegression impact on exercise decision:")
-                        print(
-                            f"Paths where raw value suggests exercise but smooth doesn't:"
-                        )
-                        raw_exercise = (
-                            issuer_values[itm_mask, step] > immediate_issuer_value
-                        )
-                        smooth_exercise = (
-                            continuation_value_smooth[itm_mask] < immediate_issuer_value
-                        )
-                        diff_count = np.sum(raw_exercise & ~smooth_exercise)
-                        print(
-                            f"  {diff_count} paths ({diff_count/np.sum(itm_mask)*100:.1f}%)"
-                        )
-
-                        print(f"Paths where smooth suggests exercise but raw doesn't:")
-                        diff_count2 = np.sum(~raw_exercise & smooth_exercise)
-                        print(
-                            f"  {diff_count2} paths ({diff_count2/np.sum(itm_mask)*100:.1f}%)"
-                        )
 
                     # Exercise decision from issuer perspective:
                     # Call if: cost of calling now < expected future cost
                     immediate_issuer_value = -callable_bond.call_price
 
                     # If calling on a coupon date, must also pay the coupon
-                    if self._is_coupon_date(current_time, callable_bond):
+                    if (
+                        self.include_coupon_on_call
+                        and self._is_coupon_date(current_time, callable_bond)
+                    ):
                         immediate_issuer_value -= callable_bond.coupon_payment
 
                     exercise = (
@@ -224,7 +176,10 @@ class CallableBondEngine(LongstaffSchwartzEngine):
 
                     # Record what investor receives when bond is called
                     call_payment = callable_bond.call_price
-                    if self._is_coupon_date(current_time, callable_bond):
+                    if (
+                        self.include_coupon_on_call
+                        and self._is_coupon_date(current_time, callable_bond)
+                    ):
                         call_payment += callable_bond.coupon_payment
                     cash_flows[exercise, step] = call_payment
                     # Zero out all future cash flows for called bonds
@@ -245,7 +200,10 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                     immediate_issuer_value = -callable_bond.call_price
 
                     # If calling on a coupon date, must also pay the coupon
-                    if self._is_coupon_date(current_time, callable_bond):
+                    if (
+                        self.include_coupon_on_call
+                        and self._is_coupon_date(current_time, callable_bond)
+                    ):
                         immediate_issuer_value -= callable_bond.coupon_payment
 
                     continuation = issuer_values[:, step]
@@ -259,7 +217,10 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                         call_indicator[exercise] = True
                         call_time[exercise] = current_time
                         call_payment = callable_bond.call_price
-                        if self._is_coupon_date(current_time, callable_bond):
+                        if (
+                            self.include_coupon_on_call
+                            and self._is_coupon_date(current_time, callable_bond)
+                        ):
                             call_payment += callable_bond.coupon_payment
                         cash_flows[exercise, step] = call_payment
                         issuer_values[exercise, step] = immediate_issuer_value
@@ -294,6 +255,7 @@ class CallableBondEngine(LongstaffSchwartzEngine):
             "mean_call_time": mean_call_time,
             "exercise_boundary": exercise_boundary,
             "paths_used": n_paths,
+            "include_coupon_on_call": self.include_coupon_on_call,
         }
 
         # Adjust perspective if needed
@@ -383,7 +345,7 @@ class CallableBondEngine(LongstaffSchwartzEngine):
         cash_flows: np.ndarray,
         rates: np.ndarray,
         times: np.ndarray,
-        bond: CallableBond = None,
+        bond: Optional[CallableBond] = None,
     ) -> np.ndarray:
         """Discount cash flows to present value"""
         pv = np.zeros(cash_flows.shape[0])
@@ -407,7 +369,7 @@ class CallableBondEngine(LongstaffSchwartzEngine):
         """Price the bond without call feature"""
         # For a straight bond, we can use the deterministic value at t=0
         # using the initial short rate from the yield curve
-        initial_rate = self.mc_engine.model.yield_curve.get_rate(0.0)
+        initial_rate = float(self.mc_engine.model.yield_curve.get_rate(0.0))
 
         # Value the bond at t=0 with the initial rate
         straight_value = bond.value(self.mc_engine.model, 0.0, initial_rate)
