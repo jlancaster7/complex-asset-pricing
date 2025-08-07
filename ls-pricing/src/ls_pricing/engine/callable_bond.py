@@ -91,6 +91,8 @@ class CallableBondEngine(LongstaffSchwartzEngine):
         call_indicator = np.zeros(n_paths, dtype=bool)
         call_time = np.zeros(n_paths)
         exercise_boundary = {}
+        # NEW: regression diagnostics per exercise (after regression smoothing)
+        regression_diagnostics: Dict[float, Dict[str, object]] = {}
 
         # ADDED: Track issuer's value/liability at each node
         # This is key for making optimal call decisions
@@ -144,6 +146,28 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                     y_itm = continuation[itm_mask]
                     basis = self.basis_func(X_itm, self.basis_degree)
                     self.regressor.fit(basis, y_itm)
+                    # NEW: capture diagnostics for this regression
+                    try:
+                        y_fit = self.regressor.predict(basis)
+                        mse = float(np.mean((y_fit - y_itm) ** 2))
+                        # R^2 using model score (already centers appropriately for linear regression without intercept)
+                        r2 = float(self.regressor.score(basis, y_itm))
+                        coefs = (
+                            self.regressor.coef_.tolist()
+                            if hasattr(self.regressor, "coef_")
+                            else []
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        mse, r2, coefs = float("nan"), float("nan"), []
+                    regression_diagnostics[current_time] = {
+                        "coefficients": coefs,
+                        "r2": r2,
+                        "mse": mse,
+                        "n_itm": int(np.sum(itm_mask)),
+                        "n_paths": int(n_paths),
+                        "basis_type": self.basis_type,
+                        "basis_degree": self.basis_degree,
+                    }
 
                     # Predict continuation value for ALL paths using the regression
                     # The regression was fitted on ITM paths but can predict for all
@@ -156,9 +180,8 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                     immediate_issuer_value = -callable_bond.call_price
 
                     # If calling on a coupon date, must also pay the coupon
-                    if (
-                        self.include_coupon_on_call
-                        and self._is_coupon_date(current_time, callable_bond)
+                    if self.include_coupon_on_call and self._is_coupon_date(
+                        current_time, callable_bond
                     ):
                         immediate_issuer_value -= callable_bond.coupon_payment
 
@@ -176,9 +199,8 @@ class CallableBondEngine(LongstaffSchwartzEngine):
 
                     # Record what investor receives when bond is called
                     call_payment = callable_bond.call_price
-                    if (
-                        self.include_coupon_on_call
-                        and self._is_coupon_date(current_time, callable_bond)
+                    if self.include_coupon_on_call and self._is_coupon_date(
+                        current_time, callable_bond
                     ):
                         call_payment += callable_bond.coupon_payment
                     cash_flows[exercise, step] = call_payment
@@ -200,9 +222,8 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                     immediate_issuer_value = -callable_bond.call_price
 
                     # If calling on a coupon date, must also pay the coupon
-                    if (
-                        self.include_coupon_on_call
-                        and self._is_coupon_date(current_time, callable_bond)
+                    if self.include_coupon_on_call and self._is_coupon_date(
+                        current_time, callable_bond
                     ):
                         immediate_issuer_value -= callable_bond.coupon_payment
 
@@ -217,9 +238,8 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                         call_indicator[exercise] = True
                         call_time[exercise] = current_time
                         call_payment = callable_bond.call_price
-                        if (
-                            self.include_coupon_on_call
-                            and self._is_coupon_date(current_time, callable_bond)
+                        if self.include_coupon_on_call and self._is_coupon_date(
+                            current_time, callable_bond
                         ):
                             call_payment += callable_bond.coupon_payment
                         cash_flows[exercise, step] = call_payment
@@ -256,6 +276,7 @@ class CallableBondEngine(LongstaffSchwartzEngine):
             "exercise_boundary": exercise_boundary,
             "paths_used": n_paths,
             "include_coupon_on_call": self.include_coupon_on_call,
+            "regression_diagnostics": regression_diagnostics,
         }
 
         # Adjust perspective if needed
