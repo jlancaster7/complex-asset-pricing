@@ -1,10 +1,16 @@
 import numpy as np
 from datetime import datetime
-from typing import Union, Optional
-from scipy.interpolate import CubicSpline
+from typing import Union
+from scipy.interpolate import CubicSpline  # type: ignore
 
 
 class YieldCurve:
+    # Attribute annotations for static type checkers
+    tenors: np.ndarray
+    rates: np.ndarray
+    day_count: str
+    curve_date: datetime
+
     def __init__(
         self,
         tenors: np.ndarray,
@@ -15,6 +21,7 @@ class YieldCurve:
         self.tenors = np.asarray(tenors)
         self.rates = np.asarray(rates)
         self.day_count = day_count
+        self.curve_date = curve_date
 
         if len(self.tenors) != len(self.rates):
             raise ValueError("Tenors and rates must have the same length")
@@ -55,11 +62,11 @@ class YieldCurve:
     def get_forward_rate(self, start_tenor: float, end_tenor: float) -> float:
         if start_tenor >= end_tenor:
             raise ValueError("Start tenor must be less than end tenor")
-
-        df_start = self.get_discount_factor(start_tenor)
-        df_end = self.get_discount_factor(end_tenor)
-
-        return -np.log(df_end / df_start) / (end_tenor - start_tenor)
+        # Ensure scalar discount factors for scalar inputs
+        df_start = float(self.get_discount_factor(start_tenor))
+        df_end = float(self.get_discount_factor(end_tenor))
+        fwd = -np.log(df_end / df_start) / (end_tenor - start_tenor)
+        return float(fwd)
 
     def shift_curve(self, shift: float) -> "YieldCurve":
         return YieldCurve(
