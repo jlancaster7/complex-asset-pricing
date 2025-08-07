@@ -1,5 +1,5 @@
 import numpy as np
-from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.linear_model import LinearRegression, Ridge  # type: ignore
 from typing import Dict, List, Optional, Tuple
 from .monte_carlo import MonteCarloEngine
 from ..core.hull_white import HullWhiteModel
@@ -19,22 +19,13 @@ class RegressionBasis:
         """
         n = len(x)
         basis = np.zeros((n, degree + 1))
-        
-        # L0
         basis[:, 0] = 1.0
-        
         if degree >= 1:
-            # L1
             basis[:, 1] = 1 - x
-            
         if degree >= 2:
-            # L2
             basis[:, 2] = 1 - 2*x + x**2/2
-            
         if degree >= 3:
-            # L3
             basis[:, 3] = 1 - 3*x + 3*x**2/2 - x**3/6
-            
         return basis
     
     @staticmethod
@@ -42,10 +33,8 @@ class RegressionBasis:
         """Simple polynomial basis: [1, x, x², x³, ...]"""
         n = len(x)
         basis = np.zeros((n, degree + 1))
-        
         for i in range(degree + 1):
             basis[:, i] = x**i
-            
         return basis
 
 
@@ -101,27 +90,19 @@ class LongstaffSchwartzEngine:
         """
         if bond_maturity <= option_maturity:
             raise ValueError("Bond maturity must be greater than option maturity")
-        
-        # Generate paths
         paths = self.mc_engine.generate_paths(T=option_maturity)
         rates = paths['rates']
         times = paths['times']
         discount_factors = paths['discount_factors']
-        
         n_paths, n_steps = rates.shape[0], rates.shape[1] - 1
-        
-        # Set exercise dates (default: all time steps except t=0)
         if exercise_dates is None:
-            exercise_steps = list(range(1, n_steps + 1))
+            exercise_steps: List[int] = list(range(1, n_steps + 1))
         else:
-            # Map exercise dates to step indices
-            exercise_steps = [np.argmin(np.abs(times - t)) for t in exercise_dates]
-            exercise_steps = [s for s in exercise_steps if s > 0]  # Exclude t=0
-        
-        # Initialize cash flow matrix
-        cash_flows = np.zeros((n_paths, n_steps + 1))
-        exercise_time = np.zeros(n_paths)  # Track when each path exercises
-        exercise_boundary = {}
+            exercise_steps = [int(np.argmin(np.abs(times - t))) for t in exercise_dates]
+            exercise_steps = [int(s) for s in exercise_steps if s > 0]
+        cash_flows = np.zeros((n_paths, len(times)))
+        exercise_time = np.zeros(n_paths)
+        exercise_boundary: Dict[float, Dict[str, float]] = {}
         
         # Terminal payoff
         terminal_bond_prices = np.array([
@@ -140,7 +121,7 @@ class LongstaffSchwartzEngine:
         
         # Backward induction
         for i in range(len(exercise_steps) - 1, -1, -1):
-            step = exercise_steps[i]
+            step = int(exercise_steps[i])
             current_time = times[step]
             
             # Current bond prices
@@ -159,17 +140,12 @@ class LongstaffSchwartzEngine:
             itm_mask = immediate_value > 0
             
             if np.sum(itm_mask) > 10:  # Need enough points for regression
-                # Future cash flows (discounted back to current step)
-                future_cf = self._discount_future_cashflows(
-                    cash_flows[:, step+1:],
-                    rates[:, step:],
-                    times[step:],
-                    step
-                )
+                # Discount all future cash flows (step+1 .. end) back to current step using DF ratios
+                future_cf_pv = self._discount_future_cashflows(cash_flows, discount_factors, int(step))
                 
                 # Regression on ITM paths using short rate as state variable
                 X_itm = rates[itm_mask, step]
-                y_itm = future_cf[itm_mask]
+                y_itm = future_cf_pv[itm_mask]
                 
                 # Generate basis functions
                 basis = self.basis_func(X_itm, self.basis_degree)
@@ -186,33 +162,31 @@ class LongstaffSchwartzEngine:
                 
                 # Update cash flows
                 cash_flows[exercise, step] = immediate_value[exercise]
-                cash_flows[exercise, step+1:] = 0
+                cash_flows[exercise, step+1:] = 0.0
                 exercise_time[exercise] = current_time
                 
                 # Store exercise boundary info
                 if np.sum(exercise) > 0:
                     exercise_boundary[current_time] = {
-                        'mean_rate': np.mean(rates[exercise, step]),
-                        'mean_bond_price': np.mean(bond_prices[exercise]),
-                        'exercise_prob': np.mean(exercise),
-                        'n_exercised': np.sum(exercise)
+                        'mean_rate': float(np.mean(rates[exercise, step])),
+                        'mean_bond_price': float(np.mean(bond_prices[exercise])),
+                        'exercise_prob': float(np.mean(exercise)),
+                        'n_exercised': float(np.sum(exercise))
                     }
         
         # Calculate option value
-        option_values = self._calculate_option_values(
-            cash_flows, rates, times
-        )
+        option_values = self._calculate_option_values(cash_flows, discount_factors)
         
         # Calculate exercise probability
         exercise_prob = np.mean(exercise_time > 0)
-        mean_exercise_time = np.mean(exercise_time[exercise_time > 0]) if exercise_prob > 0 else 0
+        mean_exercise_time = np.mean(exercise_time[exercise_time > 0]) if exercise_prob > 0 else 0.0
         
         return {
-            'price': np.mean(option_values),
-            'std_error': np.std(option_values) / np.sqrt(n_paths),
+            'price': float(np.mean(option_values)),
+            'std_error': float(np.std(option_values) / np.sqrt(n_paths)),
             'exercise_boundary': exercise_boundary,
-            'exercise_prob': exercise_prob,
-            'mean_exercise_time': mean_exercise_time,
+            'exercise_prob': float(exercise_prob),
+            'mean_exercise_time': float(mean_exercise_time),
             'paths_used': n_paths
         }
     
@@ -225,56 +199,41 @@ class LongstaffSchwartzEngine:
         """Calculate option payoff"""
         if option_type.lower() == 'put':
             return np.maximum(strike - bond_prices, 0)
-        else:  # call
-            return np.maximum(bond_prices - strike, 0)
+        return np.maximum(bond_prices - strike, 0)
     
     def _discount_future_cashflows(
         self,
-        future_cf: np.ndarray,
-        rates: np.ndarray,
-        times: np.ndarray,
+        cash_flows: np.ndarray,
+        discount_factors: np.ndarray,
         current_step: int
     ) -> np.ndarray:
-        """Discount future cash flows to current time"""
-        result = np.zeros(future_cf.shape[0])
+        """Present value at current step of all future cash flows for each path.
+        Uses pathwise discount factor ratios: PV_ti(CF_tj) = CF_tj * DF(0,tj)/DF(0,ti)."""
+        df_current = discount_factors[:, current_step]
+        result = np.zeros(cash_flows.shape[0])
         
-        # For each future time step
-        for i in range(future_cf.shape[1]):
-            if i < rates.shape[1] - 1:
-                # Calculate discount factor from current time to future time
-                dt = times[i+1] - times[0]
-                # Use average rate for discounting
-                avg_rates = np.mean(rates[:, :i+1], axis=1)
-                discount = np.exp(-avg_rates * dt)
-                result += future_cf[:, i] * discount
+        # Iterate over future steps only where any cash flow exists to avoid extra work
+        future_indices = np.where(np.any(cash_flows[:, current_step+1:] > 0, axis=0))[0] + current_step + 1
+        for j in future_indices:
+            cf = cash_flows[:, j]
+            if np.any(cf):
+                result += cf * (discount_factors[:, j] / df_current)
                 
         return result
     
     def _calculate_option_values(
         self,
         cash_flows: np.ndarray,
-        rates: np.ndarray,
-        times: np.ndarray
+        discount_factors: np.ndarray
     ) -> np.ndarray:
-        """Calculate present value of option for each path"""
+        """Present value at time 0 for each path: first non-zero CF discounted by DF(0,t)."""
         pv = np.zeros(cash_flows.shape[0])
         
         for i in range(cash_flows.shape[0]):
-            # Find first non-zero cash flow (exercise time)
-            cf_indices = np.where(cash_flows[i] > 0)[0]
-            if len(cf_indices) > 0:
-                exercise_idx = cf_indices[0]
-                exercise_time = times[exercise_idx]
+            idx = np.argmax(cash_flows[i] > 0)
+            if cash_flows[i, idx] > 0:  # valid exercise/terminal payoff
+                pv[i] = cash_flows[i, idx] * discount_factors[i, idx]
                 
-                # Discount from exercise time to present
-                if exercise_time > 0:
-                    # Average rate from 0 to exercise time
-                    avg_rate = np.mean(rates[i, :exercise_idx+1])
-                    discount = np.exp(-avg_rate * exercise_time)
-                    pv[i] = cash_flows[i, exercise_idx] * discount
-                else:
-                    pv[i] = cash_flows[i, exercise_idx]
-                    
         return pv
     
     def price_european_option(
@@ -294,7 +253,7 @@ class LongstaffSchwartzEngine:
         # Generate paths
         paths = self.mc_engine.generate_paths(T=option_maturity)
         rates = paths['rates']
-        times = paths['times']
+        discount_factors = paths['discount_factors']
         
         n_paths = rates.shape[0]
         
@@ -310,13 +269,10 @@ class LongstaffSchwartzEngine:
         # Terminal payoff
         payoffs = self._calculate_payoff(terminal_bond_prices, strike, option_type)
         
-        # Discount to present
-        avg_rates = np.mean(rates, axis=1)
-        discount_factors = np.exp(-avg_rates * option_maturity)
-        option_values = payoffs * discount_factors
+        option_values = payoffs * discount_factors[:, -1]
         
         return {
-            'price': np.mean(option_values),
-            'std_error': np.std(option_values) / np.sqrt(n_paths),
+            'price': float(np.mean(option_values)),
+            'std_error': float(np.std(option_values) / np.sqrt(n_paths)),
             'paths_used': n_paths
         }

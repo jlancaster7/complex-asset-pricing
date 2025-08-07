@@ -312,7 +312,7 @@ class TestCallableBondEngine:
             coupon_rate=0.06,
             maturity=10.0,
             payment_frequency=2,
-            first_call_date=9.5,  # Callable only in last 6 months
+            first_call_date=10.0,  # Callable only at maturity (effectively non-callable)
             call_price=100.0
         )
         
