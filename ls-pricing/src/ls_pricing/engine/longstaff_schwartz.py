@@ -90,50 +90,48 @@ class LongstaffSchwartzEngine:
         """
         if bond_maturity <= option_maturity:
             raise ValueError("Bond maturity must be greater than option maturity")
-        paths = self.mc_engine.generate_paths(T=option_maturity)
+        # Simulate out to the bond maturity so we can price the bond via DF ratios
+        paths = self.mc_engine.generate_paths(T=bond_maturity)
         rates = paths["rates"]
         times = paths["times"]
         discount_factors = paths["discount_factors"]
         n_paths, n_steps = rates.shape[0], rates.shape[1] - 1
+        # Restrict exercise opportunities to times up to option maturity
         if exercise_dates is None:
-            exercise_steps: List[int] = list(range(1, n_steps + 1))
+            # All grid steps strictly after t=0 and up to option maturity
+            exercise_steps: List[int] = [
+                i for i, t in enumerate(times) if 0 < t <= option_maturity
+            ]
         else:
             exercise_steps = [int(np.argmin(np.abs(times - t))) for t in exercise_dates]
-            exercise_steps = [int(s) for s in exercise_steps if s > 0]
+            exercise_steps = [
+                int(s) for s in exercise_steps if 0 < times[int(s)] <= option_maturity
+            ]
         cash_flows = np.zeros((n_paths, len(times)))
         exercise_time = np.zeros(n_paths)
         exercise_boundary: Dict[float, Dict[str, float]] = {}
 
-        # Terminal payoff
-        terminal_bond_prices = np.array(
-            [
-                self.mc_engine.model.zero_bond_price(
-                    t=option_maturity, T=bond_maturity, r_t=rates[i, -1]
-                )
-                for i in range(n_paths)
-            ]
-        )
+        # Indices for option maturity and bond maturity
+        idx_opt = int(np.argmin(np.abs(times - option_maturity)))
+        idx_bond = len(times) - 1  # last index corresponds to bond maturity
 
+        # Terminal payoff at option maturity using pathwise bond price via DF ratios
+        terminal_bond_prices = (
+            discount_factors[:, idx_bond] / discount_factors[:, idx_opt]
+        )
         terminal_payoff = self._calculate_payoff(
             terminal_bond_prices, strike, option_type
         )
-        cash_flows[:, -1] = terminal_payoff
-        exercise_time[terminal_payoff > 0] = option_maturity
+        cash_flows[:, idx_opt] = terminal_payoff
+        exercise_time[terminal_payoff > 0] = times[idx_opt]
 
         # Backward induction
         for i in range(len(exercise_steps) - 1, -1, -1):
             step = int(exercise_steps[i])
             current_time = times[step]
 
-            # Current bond prices
-            bond_prices = np.array(
-                [
-                    self.mc_engine.model.zero_bond_price(
-                        t=current_time, T=bond_maturity, r_t=rates[j, step]
-                    )
-                    for j in range(n_paths)
-                ]
-            )
+            # Underlying bond price at current step via DF ratios
+            bond_prices = discount_factors[:, idx_bond] / discount_factors[:, step]
 
             # Immediate exercise value
             immediate_value = self._calculate_payoff(bond_prices, strike, option_type)
@@ -166,6 +164,7 @@ class LongstaffSchwartzEngine:
 
                 # Update cash flows
                 cash_flows[exercise, step] = immediate_value[exercise]
+                # Zero out any future cash flows after exercise time (beyond option maturity index)
                 cash_flows[exercise, step + 1 :] = 0.0
                 exercise_time[exercise] = current_time
 
@@ -252,28 +251,22 @@ class LongstaffSchwartzEngine:
         """
         if bond_maturity <= option_maturity:
             raise ValueError("Bond maturity must be greater than option maturity")
-
-        # Generate paths
-        paths = self.mc_engine.generate_paths(T=option_maturity)
+        # Simulate to bond maturity
+        paths = self.mc_engine.generate_paths(T=bond_maturity)
         rates = paths["rates"]
         discount_factors = paths["discount_factors"]
-
+        times = paths["times"]
         n_paths = rates.shape[0]
 
-        # Terminal bond prices
-        terminal_bond_prices = np.array(
-            [
-                self.mc_engine.model.zero_bond_price(
-                    t=option_maturity, T=bond_maturity, r_t=rates[i, -1]
-                )
-                for i in range(n_paths)
-            ]
+        idx_opt = int(np.argmin(np.abs(times - option_maturity)))
+        idx_bond = len(times) - 1
+
+        # Terminal bond price via DF ratios, terminal payoff then discounted with DF(0, option_maturity)
+        terminal_bond_prices = (
+            discount_factors[:, idx_bond] / discount_factors[:, idx_opt]
         )
-
-        # Terminal payoff
         payoffs = self._calculate_payoff(terminal_bond_prices, strike, option_type)
-
-        option_values = payoffs * discount_factors[:, -1]
+        option_values = payoffs * discount_factors[:, idx_opt]
 
         return {
             "price": float(np.mean(option_values)),

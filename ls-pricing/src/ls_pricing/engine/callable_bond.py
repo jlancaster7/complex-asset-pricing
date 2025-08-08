@@ -162,13 +162,10 @@ class CallableBondEngine(LongstaffSchwartzEngine):
 
             # Now check if this is a callable date and make optimal exercise decision
             if step in exercise_indices:
-                # Bond value at this node (what it's worth if held)
-                bond_values = callable_bond.value_at_node(
-                    self.mc_engine.model, current_time, rates[:, step]
+                # Pathwise bond value at node using DF ratios (model-agnostic)
+                bond_values = self._pathwise_bond_value(
+                    callable_bond, step, times, discount_factors
                 )
-
-                # Immediate exercise value for issuer
-                # Issuer saves: Bond Value - Call Price
                 immediate_ex_value = bond_values - callable_bond.call_price
 
                 # Only consider calling if bond is worth more than call price
@@ -501,3 +498,47 @@ class CallableBondEngine(LongstaffSchwartzEngine):
             True if we have cached paths for this maturity
         """
         return self._cached_paths is not None and self._cached_maturity == maturity
+
+    def _pathwise_bond_value(
+        self,
+        bond: CallableBond,
+        step: int,
+        times: np.ndarray,
+        discount_factors: Optional[np.ndarray],
+    ) -> np.ndarray:
+        """Present value at the current time step of remaining scheduled payments using
+        pathwise DF ratios and credit spread adjustment. Returns array of shape (n_paths,).
+        """
+        current_time = float(times[step])
+        payment_times, cash_flows = bond.get_cash_flow_schedule(from_time=current_time)
+        if len(payment_times) == 0:
+            return np.zeros(
+                self._cached_paths["rates"].shape[0] if self._cached_paths else 0
+            )
+
+        n_paths = (
+            self._cached_paths["rates"].shape[0]
+            if self._cached_paths is not None
+            else 0
+        )
+        if n_paths == 0 and discount_factors is not None:
+            n_paths = discount_factors.shape[0]
+        if n_paths == 0:
+            return np.zeros(0)
+
+        # Map payments to indices on the grid
+        pay_indices = np.array(
+            [int(np.argmin(np.abs(times - t))) for t in payment_times], dtype=int
+        )
+        dt_from_now = times[pay_indices] - current_time
+        spread_adj = np.exp(-bond.credit_spread * dt_from_now)[None, :]
+
+        if discount_factors is None:
+            # Fallback using short-rate local approx (rare; MC engine provides DFs)
+            return np.zeros(n_paths)
+
+        df_now = discount_factors[:, step][:, None]  # (n_paths,1)
+        df_pay = discount_factors[:, pay_indices]  # (n_paths,k)
+        df_ratio = df_pay / df_now  # (n_paths,k)
+        pv_matrix = df_ratio * spread_adj * cash_flows[None, :]
+        return np.sum(pv_matrix, axis=1)

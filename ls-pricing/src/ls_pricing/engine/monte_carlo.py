@@ -1,16 +1,21 @@
 import numpy as np
-from typing import Dict, Optional
-from ..core.hull_white import HullWhiteModel
+from typing import Dict, Optional, Protocol
+
+
+class ShortRateModel(Protocol):
+    def simulate_short_rate(
+        self, t_grid: np.ndarray, n_paths: int, seed: Optional[int] = None
+    ) -> np.ndarray: ...
 
 
 class MonteCarloEngine:
     """Wrapper for Monte Carlo simulation with diagnostics"""
 
-    def __init__(self, model: HullWhiteModel, n_paths: int = 10000, n_steps: int = 100):
+    def __init__(self, model: ShortRateModel, n_paths: int = 10000, n_steps: int = 100):
         self.model = model
         self.n_paths = n_paths
         self.n_steps = n_steps
-        self.paths_cache = None
+        self.paths_cache: Optional[Dict[str, np.ndarray]] = None
 
     def generate_paths(
         self,
