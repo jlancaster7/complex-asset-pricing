@@ -99,6 +99,12 @@ class HullWhiteModel:
     def calibrate_to_swaptions(
         self, swaption_data: dict, initial_params: Optional[Tuple[float, float]] = None
     ) -> Tuple[float, float]:
+        import warnings
+
         if initial_params is None:
             initial_params = (self.a, self.sigma)
+        warnings.warn(
+            "Hull-White calibration to swaptions is not implemented yet; returning initial parameters.",
+            category=UserWarning,
+        )
         return initial_params

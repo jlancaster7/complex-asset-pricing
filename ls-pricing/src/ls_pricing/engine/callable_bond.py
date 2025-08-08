@@ -67,6 +67,7 @@ class CallableBondEngine(LongstaffSchwartzEngine):
 
         rates = paths["rates"]
         times = paths["times"]
+        discount_factors = paths.get("discount_factors", None)
 
         n_paths = rates.shape[0]
 
@@ -111,11 +112,17 @@ class CallableBondEngine(LongstaffSchwartzEngine):
             current_time = times[step]
             next_step = step + 1
 
-            # First, propagate and discount issuer values from next period
+            # First, propagate and discount issuer values from next period using DF ratios
             dt = times[next_step] - times[step]
-            discount_rates = rates[:, step] + callable_bond.credit_spread
-            discount_factors = np.exp(-discount_rates * dt)
-            issuer_values[:, step] = issuer_values[:, next_step] * discount_factors
+            if discount_factors is None:
+                # Fallback (should not happen): local step discount with short rate
+                discount_rates = rates[:, step] + callable_bond.credit_spread
+                step_df = np.exp(-discount_rates * dt)
+            else:
+                df_ratio = discount_factors[:, next_step] / discount_factors[:, step]
+                spread_factor = np.exp(-callable_bond.credit_spread * dt)
+                step_df = df_ratio * spread_factor
+            issuer_values[:, step] = issuer_values[:, next_step] * step_df
 
             # Add coupon payment if this is a coupon date (negative for issuer)
             if self._is_coupon_date(current_time, callable_bond):
@@ -137,7 +144,6 @@ class CallableBondEngine(LongstaffSchwartzEngine):
 
                 if np.sum(itm_mask) > 10:  # Need enough ITM paths for regression
                     # The continuation value is already computed in issuer_values
-                    # It now properly includes all future optimal exercise decisions!
                     continuation = issuer_values[:, step].copy()
 
                     # Use regression to smooth the continuation values
@@ -387,15 +393,29 @@ class CallableBondEngine(LongstaffSchwartzEngine):
         return pv
 
     def _price_straight_bond(self, bond: CallableBond) -> float:
-        """Price the bond without call feature"""
-        # For a straight bond, we can use the deterministic value at t=0
-        # using the initial short rate from the yield curve
-        initial_rate = float(self.mc_engine.model.yield_curve.get_rate(0.0))
+        """Price the bond without call feature using path discount factors for consistency."""
+        # Ensure paths exist for maturity
+        if self._cached_paths is None or self._cached_maturity != bond.maturity:
+            self.generate_paths(bond.maturity, seed=None)
+        assert self._cached_paths is not None
+        paths = self._cached_paths
+        times = paths["times"]
+        discount_factors = paths["discount_factors"]
+        n_paths = discount_factors.shape[0]
 
-        # Value the bond at t=0 with the initial rate
-        straight_value = bond.value(self.mc_engine.model, 0.0, initial_rate)
+        payment_times, cash_flows = bond.get_cash_flow_schedule(from_time=0.0)
+        if len(payment_times) == 0:
+            return 0.0
 
-        return straight_value
+        pv_per_path = np.zeros(n_paths)
+        for t, cf in zip(payment_times, cash_flows):
+            # nearest time index on the grid
+            idx = int(np.argmin(np.abs(times - t)))
+            # risk-free DF(0,t) from path and spread adjustment
+            spread_adj = np.exp(-bond.credit_spread * (times[idx] - 0.0))
+            pv_per_path += cf * discount_factors[:, idx] * spread_adj
+
+        return float(np.mean(pv_per_path))
 
     def _is_coupon_date(self, time: float, bond: CallableBond) -> bool:
         """Check if a given time is a coupon payment date"""
