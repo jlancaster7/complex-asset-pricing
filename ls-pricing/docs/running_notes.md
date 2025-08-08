@@ -9,6 +9,13 @@ Observed on 30Y, 10NC, 4000 paths, Laguerre degree=3:
 - ITM samples are large throughout (good statistical power).
 - Coefficient magnitudes early are very large (ill-conditioning risk with OLS + Laguerre).
 
+## Recent engineering changes
+- Unified discounting via Monte Carlo path discount factor ratios; verified convergence behavior improved and notebook parity maintained.
+- Implemented analytic theta using spline derivatives; simulation drift stabilized (less noise in early times).
+- Added include_coupon_on_call flag to reflect market convention differences.
+- Added regression diagnostics capture per exercise time; exposed in methodology notebook with summary and R² plot.
+- Factored out yield curve CSV parsing into utils/curve_io.py; updated tests and examples to use load_yield_curve_from_csv.
+
 ## Recommendations (short-term)
 - Try ridge regression for stability (e.g., regression_type="ridge", alpha in [1e-4, 1e-2]).
 - Standardize state (z-score short rate) or switch to a numerically friendlier basis in early window.

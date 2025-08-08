@@ -1,5 +1,24 @@
 # LS Pricing Codebase Review (2025-08-07)
 
+## Update (2025-08-07, post-review changes)
+Summary of remediations implemented in this pass:
+- YieldCurve: added curve_date; shift_curve now preserves date; forward-rate scalar handling clarified.
+- Discounting: LS and callable engines now use Monte Carlo path discount factor ratios consistently; straight bond PV aligned; credit spread applied via exp(-s·Δt).
+- Hull-White theta: replaced finite-difference with analytic spline-derivative formulation; improved numerical stability.
+- Callable bond engine: added include_coupon_on_call flag; persisted regression diagnostics (coefficients, R², MSE, n_itm) per exercise time.
+- Calibration: calibrate_to_swaptions now issues an explicit warning (stub remains intentional).
+- Utilities: introduced utils/curve_io.py with parse_tenor_to_years and load_yield_curve_from_csv; updated tests and example notebooks to use it.
+- Notebooks/Docs: added diagnostics section in the methodology notebook; refreshed examples to use the new curve loader.
+
+Status vs Issues in Section 4:
+- Resolved: 1, 3, 4, 5, 6, 11, 12, 16, 20.
+- Outstanding: 2 (monitor as unified DF ratios are now in place), 7–10, 13–15, 17–19.
+
+Next focus candidates:
+- RNG reproducibility manager (central np.random.Generator).
+- Regression enhancements (Ridge option, add bond price as feature) and diagnostics tests.
+- Broader documentation updates (economic conventions, API flags) and calibration roadmap.
+
 ## 1. Overview
 The repository implements Monte Carlo pricing for interest-rate contingent instruments using a 1-factor Hull-White short rate model and the Longstaff–Schwartz (LS) regression framework for early exercise. A callable fixed-rate bond (investor short an issuer call) is the primary structured product currently supported. Package management uses Poetry.
 

@@ -1,5 +1,11 @@
 # Technical Implementation Plan: Longstaff-Schwartz Option Pricing Engine
 
+## Changelog (2025-08-07)
+- Adopted pathwise discount factor ratios from MonteCarloEngine across LS and callable engines to ensure consistency.
+- Implemented analytic theta using spline derivatives of the initial curve; removed finite-difference approximation.
+- Introduced utils/curve_io.py with load_yield_curve_from_csv and parse_tenor_to_years; examples/tests refactored to use it.
+- Added configurable include_coupon_on_call in callable bond engine; persisted regression diagnostics per exercise time.
+
 ## Overview
 
 This document outlines the technical implementation of a Longstaff-Schwartz (LS) option pricing engine with Hull-White interest rate modeling. The focus is on building a minimal, production-ready system without over-engineering.
