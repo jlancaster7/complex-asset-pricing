@@ -12,44 +12,19 @@ from ls_pricing.core.hull_white import HullWhiteModel
 from ls_pricing.engine.monte_carlo import MonteCarloEngine
 from ls_pricing.engine.callable_bond import CallableBondEngine
 from ls_pricing.instruments.bonds import CallableBond
+from ls_pricing.utils.curve_io import load_yield_curve_from_csv
 
 
 def get_yield_curve():
-    # Load actual Treasury curve data
-    treasury_data = pd.read_csv("data/active_treasury_curve.csv", encoding="latin-1")
-
-    # Parse tenor strings to years
-    def tenor_to_years(tenor_str):
-        if "M" in tenor_str and "Y" not in tenor_str:
-            # Handle months
-            months = int(tenor_str.replace("M", ""))
-            return months / 12.0
-        elif "W" in tenor_str:
-            # Handle weeks
-            weeks = int(tenor_str.replace("W", ""))
-            return weeks / 52.0
-        elif "Y" in tenor_str:
-            # Handle years
-            return float(tenor_str.replace("Y", ""))
-        else:
-            return None
-
-    # Extract and convert data
-    treasury_data["TenorYears"] = treasury_data["Tenor"].apply(tenor_to_years)
-    treasury_data["YieldDecimal"] = treasury_data["Yield"] / 100.0
-
-    # Filter out any rows with invalid tenor conversions and sort by tenor
-    valid_data = treasury_data.dropna(subset=["TenorYears"]).sort_values("TenorYears")
-
-    # Extract tenors and rates
-    tenors = valid_data["TenorYears"].values
-    rates = valid_data["YieldDecimal"].values
-
-    # Create yield curve
+    # Create yield curve via utility
     curve_date = datetime(2025, 7, 22)
-
-    yield_curve = YieldCurve(tenors, rates, curve_date)
-    return yield_curve
+    return load_yield_curve_from_csv(
+        "data/active_treasury_curve.csv",
+        curve_date,
+        tenor_col="Tenor",
+        yield_col="Yield",
+        encoding="latin-1",
+    )
 
 
 def test_high_coupon_callable_pricing():
