@@ -80,18 +80,20 @@ def load_mmd_par_yield_curve_from_csv(
     - coupon_frequency: 1 (annual) or 2 (semiannual). Only 1 is exact given data.
     """
     df = pd.read_csv(csv_path, encoding=encoding)
+
     # Normalize headers: strip BOM variants then lowercase
     def _norm_col(c: object) -> str:
         s = str(c)
         # Remove true BOM and common mis-decoded sequence
         s = s.replace("\ufeff", "").replace("ï»¿", "").strip().lower()
         return s
+
     df.columns = [_norm_col(c) for c in df.columns]
 
     # Filter by rating and callable flag (case-insensitive arguments)
-    mask = (
-        df["rating_type"].str.upper() == rating_type.upper()
-    ) & (df["curve_is_callable"].str.upper() == curve_is_callable.upper())
+    mask = (df["rating_type"].str.upper() == rating_type.upper()) & (
+        df["curve_is_callable"].str.upper() == curve_is_callable.upper()
+    )
     df_f = df.loc[mask].copy()
     if df_f.empty:
         raise ValueError(
@@ -99,7 +101,11 @@ def load_mmd_par_yield_curve_from_csv(
         )
 
     def _parse_bd(s: str) -> datetime:
-        return datetime.strptime(str(s), "%m/%d/%Y") if "/" in str(s) else datetime.fromisoformat(str(s))
+        return (
+            datetime.strptime(str(s), "%m/%d/%Y")
+            if "/" in str(s)
+            else datetime.fromisoformat(str(s))
+        )
 
     df_f["_bd"] = df_f["business_date"].apply(_parse_bd)
     if business_date is not None:
@@ -159,8 +165,10 @@ def load_mmd_par_yield_curve_from_csv(
 
     if coupon_frequency != 1:
         import warnings
+
         warnings.warn(
-            "Semiannual bootstrap not supported with only annual par points; using annual coupon bootstrap.")
+            "Semiannual bootstrap not supported with only annual par points; using annual coupon bootstrap."
+        )
         coupon_frequency = 1
 
     # Annual-coupon bootstrap at integer years
@@ -176,7 +184,9 @@ def load_mmd_par_yield_curve_from_csv(
     tenors = np.array(tenors_years, dtype=float)
     dfs_arr = np.array(dfs, dtype=float)
     if np.any(dfs_arr <= 0):
-        raise ValueError("Bootstrapped discount factors contain non-positive values; check input data.")
+        raise ValueError(
+            "Bootstrapped discount factors contain non-positive values; check input data."
+        )
     zero_rates = -np.log(dfs_arr) / tenors
 
     return YieldCurve(tenors=tenors, rates=zero_rates, curve_date=curve_date)

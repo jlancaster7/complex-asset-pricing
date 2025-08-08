@@ -13,12 +13,15 @@ class CallableBondEngine(LongstaffSchwartzEngine):
     include_coupon_on_call : bool, default True
         If True, a call executed on a coupon date pays (call_price + coupon).
         If False, only call_price is paid (coupon excluded). Market conventions vary.
+    enable_diagnostics : bool, default False
+        If True, collect regression diagnostics (coefficients, R², MSE). Disable for speed.
     """
 
     # Type annotations for caches
     _cached_paths: Optional[Dict[str, np.ndarray]]
     _cached_maturity: Optional[float]
     include_coupon_on_call: bool
+    enable_diagnostics: bool
 
     def __init__(
         self,
@@ -27,11 +30,25 @@ class CallableBondEngine(LongstaffSchwartzEngine):
         basis_degree: int = 3,
         regression_type: str = "ols",
         include_coupon_on_call: bool = True,
+        enable_diagnostics: bool = False,
     ):
         super().__init__(mc_engine, basis_type, basis_degree, regression_type)
         self._cached_paths = None
         self._cached_maturity = None
         self.include_coupon_on_call = include_coupon_on_call
+        self.enable_diagnostics = enable_diagnostics
+
+    def _build_time_grid(self, bond: CallableBond) -> np.ndarray:
+        """Construct a compact time grid including coupon and call dates only."""
+        coupon_times, _ = bond.get_cash_flow_schedule()
+        # exercise windows: from first_call_date to maturity at coupon cadence
+        times = set([0.0])
+        for t in coupon_times:
+            times.add(float(t))
+        # ensure maturity included
+        times.add(float(bond.maturity))
+        grid = np.array(sorted(times), dtype=float)
+        return grid
 
     def price_callable_bond(
         self, callable_bond: CallableBond, from_investor_perspective: bool = True
@@ -53,15 +70,30 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                 - mean_call_time: Expected call time (conditional on being called)
                 - exercise_boundary: Exercise boundary information
         """
-        # Use cached paths if available and maturity matches
+        # Use compact grid aligned to cash flows for speed
+        time_grid = self._build_time_grid(callable_bond)
+
+        # Reuse cached paths if maturity and grid match
+        use_cached = False
         if (
             self._cached_paths is not None
             and self._cached_maturity == callable_bond.maturity
         ):
+            cached_times = self._cached_paths.get("times")
+            if (
+                cached_times is not None
+                and len(cached_times) == len(time_grid)
+                and np.allclose(cached_times, time_grid)
+            ):
+                use_cached = True
+
+        if use_cached:
+            assert self._cached_paths is not None
             paths = self._cached_paths
         else:
-            # Generate new paths and cache them
-            paths = self.mc_engine.generate_paths(T=callable_bond.maturity)
+            paths = self.mc_engine.generate_paths(
+                T=callable_bond.maturity, time_grid=time_grid
+            )
             self._cached_paths = paths
             self._cached_maturity = callable_bond.maturity
 
@@ -151,35 +183,31 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                     X_itm = rates[itm_mask, step]
                     y_itm = continuation[itm_mask]
                     basis = self.basis_func(X_itm, self.basis_degree)
-                    self.regressor.fit(basis, y_itm)
-                    # NEW: capture diagnostics for this regression
-                    try:
-                        y_fit = self.regressor.predict(basis)
-                        mse = float(np.mean((y_fit - y_itm) ** 2))
-                        # R^2 using model score (already centers appropriately for linear regression without intercept)
-                        r2 = float(self.regressor.score(basis, y_itm))
-                        coefs = (
-                            self.regressor.coef_.tolist()
-                            if hasattr(self.regressor, "coef_")
-                            else []
-                        )
-                    except Exception:  # pragma: no cover - defensive
-                        mse, r2, coefs = float("nan"), float("nan"), []
-                    regression_diagnostics[current_time] = {
-                        "coefficients": coefs,
-                        "r2": r2,
-                        "mse": mse,
-                        "n_itm": int(np.sum(itm_mask)),
-                        "n_paths": int(n_paths),
-                        "basis_type": self.basis_type,
-                        "basis_degree": self.basis_degree,
-                    }
 
-                    # Predict continuation value for ALL paths using the regression
-                    # The regression was fitted on ITM paths but can predict for all
+                    # Lightweight regression using lstsq
+                    beta, *_ = np.linalg.lstsq(basis, y_itm, rcond=None)
+
+                    if self.enable_diagnostics:
+                        y_fit = basis @ beta
+                        mse = float(np.mean((y_fit - y_itm) ** 2))
+                        # R²: 1 - SSE/SST with mean-centering
+                        y_mean = float(np.mean(y_itm))
+                        sst = float(np.sum((y_itm - y_mean) ** 2)) or 1.0
+                        sse = float(np.sum((y_fit - y_itm) ** 2))
+                        r2 = 1.0 - sse / sst
+                        regression_diagnostics[current_time] = {
+                            "coefficients": beta.tolist(),
+                            "r2": r2,
+                            "mse": mse,
+                            "n_itm": int(np.sum(itm_mask)),
+                            "n_paths": int(n_paths),
+                            "basis_type": self.basis_type,
+                            "basis_degree": self.basis_degree,
+                        }
+
                     X_all = rates[:, step]
                     basis_all = self.basis_func(X_all, self.basis_degree)
-                    continuation_value_smooth = self.regressor.predict(basis_all)
+                    continuation_value_smooth = basis_all @ beta
 
                     # Exercise decision from issuer perspective:
                     # Call if: cost of calling now < expected future cost
@@ -210,17 +238,17 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                     ):
                         call_payment += callable_bond.coupon_payment
                     cash_flows[exercise, step] = call_payment
-                    # Zero out all future cash flows for called bonds
-                    for future_step in range(step + 1, len(times)):
-                        cash_flows[exercise, future_step] = 0
+                    # Zero out future CFs in bulk for exercised paths
+                    if np.any(exercise):
+                        cash_flows[exercise, step + 1 :] = 0.0
 
                     # Store exercise boundary
                     if np.sum(exercise) > 0:
                         exercise_boundary[current_time] = {
-                            "mean_rate": np.mean(rates[exercise, step]),
-                            "mean_bond_value": np.mean(bond_values[exercise]),
-                            "call_probability": np.mean(exercise),
-                            "n_called": np.sum(exercise),
+                            "mean_rate": float(np.mean(rates[exercise, step])),
+                            "mean_bond_value": float(np.mean(bond_values[exercise])),
+                            "call_probability": float(np.mean(exercise)),
+                            "n_called": int(np.sum(exercise)),
                         }
                 else:
                     # Not enough ITM paths for regression
@@ -240,7 +268,7 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                         immediate_ex_value > 5.0
                     )
 
-                    if np.sum(exercise) > 0:
+                    if np.any(exercise):
                         call_indicator[exercise] = True
                         call_time[exercise] = current_time
                         call_payment = callable_bond.call_price
@@ -250,12 +278,10 @@ class CallableBondEngine(LongstaffSchwartzEngine):
                             call_payment += callable_bond.coupon_payment
                         cash_flows[exercise, step] = call_payment
                         issuer_values[exercise, step] = immediate_issuer_value
-                        # Zero out all future cash flows for called bonds
-                        for future_step in range(step + 1, len(times)):
-                            cash_flows[exercise, future_step] = 0
+                        cash_flows[exercise, step + 1 :] = 0.0
 
-        # Add regular coupon payments for bonds that weren't called
-        self._add_scheduled_payments(
+        # Vectorized scheduled coupon additions
+        self._add_scheduled_payments_vectorized(
             cash_flows, callable_bond, times, call_indicator, call_time
         )
 
@@ -282,8 +308,9 @@ class CallableBondEngine(LongstaffSchwartzEngine):
             "exercise_boundary": exercise_boundary,
             "paths_used": n_paths,
             "include_coupon_on_call": self.include_coupon_on_call,
-            "regression_diagnostics": regression_diagnostics,
         }
+        if self.enable_diagnostics:
+            results["regression_diagnostics"] = regression_diagnostics
 
         # Adjust perspective if needed
         if not from_investor_perspective:
@@ -291,6 +318,28 @@ class CallableBondEngine(LongstaffSchwartzEngine):
             results["option_value"] = -results["option_value"]
 
         return results
+
+    def _add_scheduled_payments_vectorized(
+        self,
+        cash_flows: np.ndarray,
+        bond: CallableBond,
+        times: np.ndarray,
+        call_indicator: np.ndarray,
+        call_time: np.ndarray,
+    ) -> None:
+        """Vectorized addition of scheduled coupon/principal payments."""
+        payment_times, payment_amounts = bond.get_cash_flow_schedule()
+        if len(payment_times) == 0:
+            return
+        # Map payment times to nearest indices once
+        pay_indices = np.array(
+            [int(np.argmin(np.abs(times - t))) for t in payment_times], dtype=int
+        )
+        pay_amounts = np.asarray(payment_amounts, dtype=float)
+        for idx, amt, pmt_time in zip(pay_indices, pay_amounts, payment_times):
+            # Paths that are not called by this payment time
+            mask = (~call_indicator) | (call_time > pmt_time)
+            cash_flows[mask, idx] += amt
 
     def _calculate_remaining_payments(
         self, bond: CallableBond, from_time: float, rates: np.ndarray
